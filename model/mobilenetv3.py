@@ -34,7 +34,7 @@ class MobileNetV3LargeEncoder(MobileNetV3):
         del self.classifier
         
     def forward_single_frame(self, x):
-        x = normalize(x, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        #x = normalize(x, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         
         x = self.features[0](x)
         x = self.features[1](x)
@@ -66,7 +66,8 @@ class MobileNetV3LargeEncoder(MobileNetV3):
         return features
 
     def forward(self, x):
-        if x.ndim == 5:
-            return self.forward_time_series(x)
-        else:
-            return self.forward_single_frame(x)
+        return self.forward_time_series(x)
+        #if x.ndim == 5:
+        #    return self.forward_time_series(x)
+        #else:
+        #    return self.forward_single_frame(x)

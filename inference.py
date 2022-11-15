@@ -19,7 +19,11 @@ from torchvision import transforms
 from typing import Optional, Tuple
 from tqdm.auto import tqdm
 
+from torch.nn import functional as F
+from torchvision.transforms.functional import normalize
 from inference_utils import VideoReader, VideoWriter, ImageSequenceReader, ImageSequenceWriter
+torch.manual_seed(2022)
+torch._C._jit_set_texpr_fuser_enabled(False)
 
 def convert_video(model,
                   input_source: str,
@@ -114,17 +118,21 @@ def convert_video(model,
     if (output_composition is not None) and (output_type == 'video'):
         bgr = torch.tensor([120, 255, 155], device=device, dtype=dtype).div(255).view(1, 1, 3, 1, 1)
     
+    r4 = torch.zeros((1, 64, 17, 30))
+    r3 = torch.zeros((1, 40, 34, 60))
+    r2 = torch.zeros((1, 20, 68, 120))
+    r1 = torch.zeros((1, 16, 135, 240))
     try:
         with torch.no_grad():
             bar = tqdm(total=len(source), disable=not progress, dynamic_ncols=True)
-            rec = [None] * 4
             for src in reader:
 
                 if downsample_ratio is None:
                     downsample_ratio = auto_downsample_ratio(*src.shape[2:])
 
                 src = src.to(device, dtype, non_blocking=True).unsqueeze(0) # [B, T, C, H, W]
-                fgr, pha, *rec = model(src, *rec, downsample_ratio)
+                x, x_norm = prepare_data(src, downsample_ratio)
+                fgr, pha, *rec = model(src, x_norm, x, r1, r2, r3, r4)
 
                 if output_foreground is not None:
                     writer_fgr.write(fgr[0])
@@ -156,14 +164,61 @@ def auto_downsample_ratio(h, w):
     """
     return min(512 / max(h, w), 1)
 
+def prepare_data(x, scale_factor):
+    B, T = x.shape[:2]
+    x = F.interpolate(x.flatten(0, 1), scale_factor=scale_factor,
+          mode='bilinear', align_corners=False, recompute_scale_factor=False)
+    x = x.unflatten(0, (B, T))
+    y = normalize(x, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) 
+    return x, y
 
 class Converter:
-    def __init__(self, variant: str, checkpoint: str, device: str):
+    def __init__(self, variant: str, checkpoint: str, device: str, precision='float32', use_ipex=False, downsample_ratio=0.25, do_calibration=False, calibration_conf=None, calibration_iters=None):
         self.model = MattingNetwork(variant).eval().to(device)
         self.model.load_state_dict(torch.load(checkpoint, map_location=device))
-        self.model = torch.jit.script(self.model)
-        self.model = torch.jit.freeze(self.model)
         self.device = device
+        self.precision = {'float32': torch.float32, 'float16': torch.float16, 'int8':torch.float32}[precision]
+        r4 = torch.zeros((1, 64, 17, 30), device=self.device, dtype=self.precision)
+        r3 = torch.zeros((1, 40, 34, 60), device=self.device, dtype=self.precision)
+        r2 = torch.zeros((1, 20, 68, 120), device=self.device, dtype=self.precision)
+        r1 = torch.zeros((1, 16, 135, 240), device=self.device, dtype=self.precision)
+        if precision=='float32':
+            if use_ipex:
+                import intel_extension_for_pytorch as ipex
+                self.model.backbone = self.model.backbone.to(memory_format=torch.channels_last)
+            self.model = torch.jit.script(self.model)
+            self.model = torch.jit.freeze(self.model)
+        elif precision=='int8' and use_ipex:
+            import intel_extension_for_pytorch as ipex
+            from intel_extension_for_pytorch.quantization import prepare, convert
+            from torch.ao.quantization import MinMaxObserver, PerChannelMinMaxObserver, QConfig
+            d = torch.randn(1, 1, 3, 1080, 1920)
+            d_sm, d_norm = prepare_data(d, downsample_ratio)
+            #.to(memory_format=torch.channels_last)
+            # self.model.backbone = self.model.backbone.to(memory_format=torch.channels_last)
+            qconfig = QConfig(activation=MinMaxObserver.with_args(qscheme=torch.per_tensor_affine, dtype=torch.quint8), weight=PerChannelMinMaxObserver.with_args(dtype=torch.qint8, qscheme=torch.per_channel_symmetric))
+            prepared_model = prepare(self.model, qconfig, example_inputs=(d, d_norm, d_sm, r1, r2, r3, r4), inplace=False)
+            with torch.no_grad():
+                if do_calibration:
+                    files=os.listdir('true/videomatte_1920x1080/videomatte_motion/')
+                    count = 0
+                    for filename in files:
+                        source = ImageSequenceReader('true/videomatte_1920x1080/videomatte_motion/'+filename+'/com', transforms.ToTensor())
+                        reader = DataLoader(source, batch_size=1)
+                        for src in reader:
+                            if count >= calibration_iters:
+                                break
+                            src = src.unsqueeze(0)
+                            d, d_norm = prepare_data(src, downsample_ratio)
+                            prepared_model(src, d_norm, d, r1, r2, r3, r4)
+                            count += 1
+                    prepared_model.save_qconf_summary('calibration_'+str(count)+'.json')
+                else:
+                    prepared_model.load_qconf_summary(qconf_summary=calibration_conf)
+            self.model = convert(prepared_model)
+            with torch.no_grad():
+                self.model = torch.jit.trace(self.model, (d, d_norm, d_sm, r1, r2, r3, r4))
+                self.model = torch.jit.freeze(self.model)
     
     def convert(self, *args, **kwargs):
         convert_video(self.model, device=self.device, dtype=torch.float32, *args, **kwargs)
@@ -177,7 +232,9 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--device', type=str, required=True)
     parser.add_argument('--input-source', type=str, required=True)
-    parser.add_argument('--input-resize', type=int, default=None, nargs=2)
+    parser.add_argument('--use_ipex', type=bool, default=False)
+    parser.add_argument('--precision', type=str, default='float32')
+    parser.add_argument('--input-resize', type=str, default=None, nargs=2)
     parser.add_argument('--downsample-ratio', type=float)
     parser.add_argument('--output-composition', type=str)
     parser.add_argument('--output-alpha', type=str)
@@ -186,10 +243,13 @@ if __name__ == '__main__':
     parser.add_argument('--output-video-mbps', type=int, default=1)
     parser.add_argument('--seq-chunk', type=int, default=1)
     parser.add_argument('--num-workers', type=int, default=0)
+    parser.add_argument('--calibration-iters', type=int, default=0)
+    parser.add_argument('--calibration-conf', type=str, default='calibration.json')
+    parser.add_argument('--do-calibration', type=bool, default=False)
     parser.add_argument('--disable-progress', action='store_true')
     args = parser.parse_args()
     
-    converter = Converter(args.variant, args.checkpoint, args.device)
+    converter = Converter(args.variant, args.checkpoint, args.device, args.precision, args.use_ipex, args.downsample_ratio, args.do_calibration, args.calibration_conf, args.calibration_iters)
     converter.convert(
         input_source=args.input_source,
         input_resize=args.input_resize,

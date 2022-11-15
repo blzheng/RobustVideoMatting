@@ -23,7 +23,7 @@ class LRASPP(nn.Module):
         return x
     
     def forward(self, x):
-        if x.ndim == 5:
-            return self.forward_time_series(x)
-        else:
-            return self.forward_single_frame(x)
+        #if x.ndim == 5:
+        return self.forward_time_series(x)
+        #else:
+        #    return self.forward_single_frame(x)

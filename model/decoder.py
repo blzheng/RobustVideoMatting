@@ -1,8 +1,6 @@
 import torch
 from torch import Tensor
 from torch import nn
-from torch.nn import functional as F
-from typing import Tuple, Optional
 
 class RecurrentDecoder(nn.Module):
     def __init__(self, feature_channels, decoder_channels):
@@ -16,8 +14,8 @@ class RecurrentDecoder(nn.Module):
 
     def forward(self,
                 s0: Tensor, f1: Tensor, f2: Tensor, f3: Tensor, f4: Tensor,
-                r1: Optional[Tensor], r2: Optional[Tensor],
-                r3: Optional[Tensor], r4: Optional[Tensor]):
+                r1: Tensor, r2: Tensor,
+                r3: Tensor, r4: Tensor):
         s1, s2, s3 = self.avgpool(s0)
         x4, r4 = self.decode4(f4, r4)
         x3, r3 = self.decode3(x4, f3, s3, r3)
@@ -48,10 +46,10 @@ class AvgPool(nn.Module):
         return s1, s2, s3
     
     def forward(self, s0):
-        if s0.ndim == 5:
-            return self.forward_time_series(s0)
-        else:
-            return self.forward_single_frame(s0)
+        #if s0.ndim == 5:
+        return self.forward_time_series(s0)
+        #else:
+        #    return self.forward_single_frame(s0)
 
 
 class BottleneckBlock(nn.Module):
@@ -60,7 +58,7 @@ class BottleneckBlock(nn.Module):
         self.channels = channels
         self.gru = ConvGRU(channels // 2)
         
-    def forward(self, x, r: Optional[Tensor]):
+    def forward(self, x, r: Tensor):
         a, b = x.split(self.channels // 2, dim=-3)
         b, r = self.gru(b, r)
         x = torch.cat([a, b], dim=-3)
@@ -79,7 +77,7 @@ class UpsamplingBlock(nn.Module):
         )
         self.gru = ConvGRU(out_channels // 2)
 
-    def forward_single_frame(self, x, f, s, r: Optional[Tensor]):
+    def forward_single_frame(self, x, f, s, r: Tensor):
         x = self.upsample(x)
         x = x[:, :, :s.size(2), :s.size(3)]
         x = torch.cat([x, f, s], dim=1)
@@ -89,7 +87,7 @@ class UpsamplingBlock(nn.Module):
         x = torch.cat([a, b], dim=1)
         return x, r
     
-    def forward_time_series(self, x, f, s, r: Optional[Tensor]):
+    def forward_time_series(self, x, f, s, r: Tensor):
         B, T, _, H, W = s.shape
         x = x.flatten(0, 1)
         f = f.flatten(0, 1)
@@ -104,11 +102,11 @@ class UpsamplingBlock(nn.Module):
         x = torch.cat([a, b], dim=2)
         return x, r
     
-    def forward(self, x, f, s, r: Optional[Tensor]):
-        if x.ndim == 5:
-            return self.forward_time_series(x, f, s, r)
-        else:
-            return self.forward_single_frame(x, f, s, r)
+    def forward(self, x, f, s, r: Tensor):
+        # if x.ndim == 5:
+        return self.forward_time_series(x, f, s, r)
+        #else:
+        #    return self.forward_single_frame(x, f, s, r)
 
 
 class OutputBlock(nn.Module):
@@ -143,10 +141,10 @@ class OutputBlock(nn.Module):
         return x
     
     def forward(self, x, s):
-        if x.ndim == 5:
-            return self.forward_time_series(x, s)
-        else:
-            return self.forward_single_frame(x, s)
+        #if x.ndim == 5:
+        return self.forward_time_series(x, s)
+        #else:
+        #    return self.forward_single_frame(x, s)
 
 
 class ConvGRU(nn.Module):
@@ -173,21 +171,21 @@ class ConvGRU(nn.Module):
     
     def forward_time_series(self, x, h):
         o = []
-        for xt in x.unbind(dim=1):
-            ot, h = self.forward_single_frame(xt, h)
-            o.append(ot)
+        # for xt in x.unbind(dim=1):
+        ot, h = self.forward_single_frame(x.unbind(dim=1)[0], h)
+        o.append(ot)
         o = torch.stack(o, dim=1)
         return o, h
         
-    def forward(self, x, h: Optional[Tensor]):
-        if h is None:
-            h = torch.zeros((x.size(0), x.size(-3), x.size(-2), x.size(-1)),
-                            device=x.device, dtype=x.dtype)
-        
-        if x.ndim == 5:
-            return self.forward_time_series(x, h)
-        else:
-            return self.forward_single_frame(x, h)
+    def forward(self, x, h: Tensor):
+        #if h is None:
+        #    h = torch.zeros((x.size(0), x.size(-3), x.size(-2), x.size(-1)),
+        #                    device=x.device, dtype=x.dtype)
+        #
+        #if x.ndim == 5:
+        return self.forward_time_series(x, h)
+        #else:
+        #    return self.forward_single_frame(x, h)
 
 
 class Projection(nn.Module):
@@ -203,8 +201,8 @@ class Projection(nn.Module):
         return self.conv(x.flatten(0, 1)).unflatten(0, (B, T))
         
     def forward(self, x):
-        if x.ndim == 5:
-            return self.forward_time_series(x)
-        else:
-            return self.forward_single_frame(x)
+        #if x.ndim == 5:
+        return self.forward_time_series(x)
+        #else:
+        #    return self.forward_single_frame(x)
     

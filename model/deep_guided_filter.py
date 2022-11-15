@@ -55,7 +55,8 @@ class DeepGuidedFilterRefiner(nn.Module):
         return fgr, pha
     
     def forward(self, fine_src, base_src, base_fgr, base_pha, base_hid):
-        if fine_src.ndim == 5:
-            return self.forward_time_series(fine_src, base_src, base_fgr, base_pha, base_hid)
-        else:
-            return self.forward_single_frame(fine_src, base_src, base_fgr, base_pha, base_hid)
+        return self.forward_time_series(fine_src, base_src, base_fgr, base_pha, base_hid)
+        # if fine_src.ndim == 5:
+        #     return self.forward_time_series(fine_src, base_src, base_fgr, base_pha, base_hid)
+        # else:
+        #     return self.forward_single_frame(fine_src, base_src, base_fgr, base_pha, base_hid)
