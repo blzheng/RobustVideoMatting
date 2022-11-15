@@ -40,12 +40,12 @@ import kornia
 import numpy as np
 import xlsxwriter
 import torch
-from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 
 
 class Evaluator:
     def __init__(self):
+        self.results=[]
         self.parse_args()
         self.init_metrics()
         self.evaluate()
@@ -67,28 +67,22 @@ class Evaluator:
         self.dtssd = MetricDTSSD()
         
     def evaluate(self):
-        tasks = []
         position = 0
-        
-        with ThreadPoolExecutor(max_workers=self.args.num_workers) as executor:
-            for dataset in sorted(os.listdir(self.args.pred_dir)):
-                if os.path.isdir(os.path.join(self.args.pred_dir, dataset)):
-                    for clip in sorted(os.listdir(os.path.join(self.args.pred_dir, dataset))):
-                        future = executor.submit(self.evaluate_worker, dataset, clip, position)
-                        tasks.append((dataset, clip, future))
-                        position += 1
+        for dataset in sorted(os.listdir(self.args.pred_dir)):
+            if os.path.isdir(os.path.join(self.args.pred_dir, dataset)):
+                for clip in sorted(os.listdir(os.path.join(self.args.pred_dir, dataset))):
+                    self.results.append([dataset, clip, self.evaluate_worker(dataset, clip, position)])
+                    position += 1
                     
-        self.results = [(dataset, clip, future.result()) for dataset, clip, future in tasks]
-        
     def write_excel(self):
         workbook = xlsxwriter.Workbook(os.path.join(self.args.pred_dir, f'{os.path.basename(self.args.pred_dir)}.xlsx'))
         summarysheet = workbook.add_worksheet('summary')
         metricsheets = [workbook.add_worksheet(metric) for metric in self.results[0][2].keys()]
-        
+
         for i, metric in enumerate(self.results[0][2].keys()):
             summarysheet.write(i, 0, metric)
             summarysheet.write(i, 1, f'={metric}!B2')
-        
+
         for row, (dataset, clip, metrics) in enumerate(self.results):
             for metricsheet, metric in zip(metricsheets, metrics.values()):
                 # Write the header
@@ -117,8 +111,8 @@ class Evaluator:
             true_pha = cv2.imread(os.path.join(self.args.true_dir, dataset, clip, 'pha', framename), cv2.IMREAD_GRAYSCALE)
             pred_pha = cv2.imread(os.path.join(self.args.pred_dir, dataset, clip, 'pha', framename), cv2.IMREAD_GRAYSCALE)
             
-            true_pha = torch.from_numpy(true_pha).cuda(non_blocking=True).float().div_(255)
-            pred_pha = torch.from_numpy(pred_pha).cuda(non_blocking=True).float().div_(255)
+            true_pha = torch.from_numpy(true_pha).float().div_(255)
+            pred_pha = torch.from_numpy(pred_pha).float().div_(255)
             
             if 'pha_mad' in self.args.metrics:
                 metrics['pha_mad'].append(self.mad(pred_pha, true_pha))
@@ -163,8 +157,8 @@ class MetricMSE:
 class MetricGRAD:
     def __init__(self, sigma=1.4):
         self.filter_x, self.filter_y = self.gauss_filter(sigma)
-        self.filter_x = torch.from_numpy(self.filter_x).unsqueeze(0).cuda()
-        self.filter_y = torch.from_numpy(self.filter_y).unsqueeze(0).cuda()
+        self.filter_x = torch.from_numpy(self.filter_x).unsqueeze(0)
+        self.filter_y = torch.from_numpy(self.filter_y).unsqueeze(0)
     
     def __call__(self, pred, true):
         true_grad = self.gauss_gradient(true)
@@ -172,8 +166,8 @@ class MetricGRAD:
         return ((true_grad - pred_grad) ** 2).sum() / 1000
     
     def gauss_gradient(self, img):
-        img_filtered_x = kornia.filters.filter2D(img[None, None, :, :], self.filter_x, border_type='replicate')[0, 0]
-        img_filtered_y = kornia.filters.filter2D(img[None, None, :, :], self.filter_y, border_type='replicate')[0, 0]
+        img_filtered_x = kornia.filters.filter2d(img[None, None, :, :], self.filter_x, border_type='replicate')[0, 0]
+        img_filtered_y = kornia.filters.filter2d(img[None, None, :, :], self.filter_y, border_type='replicate')[0, 0]
         return (img_filtered_x**2 + img_filtered_y**2).sqrt()
     
     @staticmethod
